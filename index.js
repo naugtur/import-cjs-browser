@@ -30,7 +30,9 @@
 
 (function () {
   const { create, defineProperty, defineProperties } = Object;
+  const { log } = console;
 
+  // the goal here is to delay getting an error as long as possible
   const politeProxy = () =>
     new Proxy(function () {}, {
       has: () => true,
@@ -40,72 +42,93 @@
   const resolve = (specifier) => {
     // FIXME: I don't want to do this right now for a PoC
     // leaving this as an exercise for the reader
-    return specifier;
+    return specifier + ".cjs";
   };
 
   const gimmeRealm = () => {
     const i = document.createElement("iframe");
     // messing with the document could potentially be avoided, I don't remember
-    document.body.append(iframe);
+    document.body.append(i);
     const w = i.contentWindow;
     return {
       global: w.globalThis,
       // makes me think workers would be great for this because they do importScripts
       // but the communication would end up being async anyway
-      importScript(location) {
+      async importScript(location) {
         const idoc = i.contentDocument;
         const scr = idoc.createElement("script");
         // reminds me how I would do scr instead of src in HTML as a kid :D
         scr.src = location;
+        const done = new Promise((resolve) => {
+          scr.onload = () => {
+            log("script loaded", location);
+            resolve();
+          };
+          scr.onerror = () => {
+            log("script error", location);
+            resolve();
+          };
+        });
         i.contentDocument.head.append(scr);
-      },
-      done: new Promise((resolve) => {
-        const finalize = () => {
-          resolve(); // yes, potentially twices
+        return done.then(() => {
           document.body.removeChild(i);
-        };
-        // umm... make sure script is added in a way that onload waits for it
-        i.contentWindow.onload(finalize);
-        i.contentWindow.onerror(finalize);
-      }),
+        });
+      },
     };
   };
-  const recordRequires = (parent, edgesFound) => (specifier) => {
+  const recordRequires = (children) => (specifier) => {
+    log("require", specifier);
     // save the specifier (and parent)
-    edgesFound.push([parent, specifier]);
+    children.push(specifier);
     return politeProxy();
   };
 
   const detonate = async (specifier) => {
-    const edgesFound = [];
+    const data = {
+      specifier,
+      children: [],
+    };
     // this should be happening in an iframe or a worker
     const realm = gimmeRealm();
     realm.global.exports = {};
     realm.global.module = { exports: realm.global.exports };
-    realm.global.require = recordRequires(specifier, edgesFound);
+    realm.global.require = recordRequires(data.children);
 
-    realm.importScript(resolve(specifier));
-
-    return realm.done.then(() => edgesFound);
+    log("i", specifier);
+    return realm.importScript(resolve(specifier)).then(() => data);
   };
 
   const createGraph = async (entrySpecifier) => {
-    const knownSpecifiers = new Set();
-    const haveDependencies = new Set();
-    const moduleGraph = [];
-    const edges = [[null, entrySpecifier]];
-    while (edges.length > 0) {
-      const edge = edges.shift();
+    const visitedSpecifiers = new Set();
+    const noDependencies = new Set();
+    const graph = [];
+    const queue = [entrySpecifier];
+    while (queue.length > 0) {
+      log(">>", queue.join());
+      const next = queue.shift();
       // I'm assuming this eliminates cycles and duplicates, but didn't think too hard about it
-      if (!knownSpecifiers.has(edge[1])) {
-        knownSpecifiers.add(edge[1]);
-        const newEdges = await detonate(edge[1]);
-        if (edges) edges.push(...newEdges);
-        moduleGraph.push(...newEdges);
+      if (!visitedSpecifiers.has(next)) {
+        visitedSpecifiers.add(next);
+        const { specifier, children } = await detonate(next);
+        log("+++", specifier, children);
+        if (children.length > 0) {
+          queue.push(...children);
+        } else {
+          noDependencies.add(specifier);
+        }
+        graph.push([specifier, children]);
       }
     }
+    return {
+      graph,
+      noDependencies: Array.from(noDependencies),
+    };
   };
 
+  globalThis.createGraph = createGraph;
+})();
+
+(function () {
   const modules = create(null);
 
   const whosthere = (stack) => {
@@ -146,4 +169,4 @@
 
     REQUIRE(specifier);
   };
-})();
+});
