@@ -47,7 +47,7 @@
   const resolve = (specifier) => {
     // FIXME: I don't want to do this right now for a PoC
     // leaving this as an exercise for the reader
-    return "/test/" + specifier + ".js";
+    return specifier.replace(/^\./, "test") + ".js";
   };
 
   const gimmeRealm = () => {
