@@ -37,6 +37,9 @@
     }
   };
 
+  const basePath = new URL(location.href).pathname;
+  log({ basePath });
+
   // the goal here is to delay getting an error as long as possible
   const politeProxy = () =>
     new Proxy(function () {}, {
@@ -47,7 +50,7 @@
   const resolve = (specifier) => {
     // FIXME: I don't want to do this right now for a PoC
     // leaving this as an exercise for the reader
-    return specifier.replace(/^\./, "test") + ".js";
+    return specifier.replace(/^\.\//, basePath) + ".js";
   };
 
   const gimmeRealm = () => {
