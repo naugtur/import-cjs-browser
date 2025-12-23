@@ -1,1 +1,1 @@
-console.log(await createGraph("./a"));
+console.log(await importCJS("./a"));

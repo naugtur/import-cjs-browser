@@ -29,8 +29,13 @@
  */
 
 (function () {
-  const { create, defineProperty, defineProperties } = Object;
-  const { log } = console;
+  const { create, defineProperty, freeze, keys } = Object;
+  const { log, error } = console;
+  const assert = (cond, txt) => {
+    if (!cond) {
+      throw Error(txt || "Assertion failed");
+    }
+  };
 
   // the goal here is to delay getting an error as long as possible
   const politeProxy = () =>
@@ -42,7 +47,7 @@
   const resolve = (specifier) => {
     // FIXME: I don't want to do this right now for a PoC
     // leaving this as an exercise for the reader
-    return specifier + ".cjs";
+    return "/test/" + specifier + ".js";
   };
 
   const gimmeRealm = () => {
@@ -101,6 +106,7 @@
   const createGraph = async (entrySpecifier) => {
     const visitedSpecifiers = new Set();
     const noDependencies = new Set();
+    /** @type {[string, string[]][]} */
     const graph = [];
     const queue = [entrySpecifier];
     while (queue.length > 0) {
@@ -125,37 +131,94 @@
     };
   };
 
-  globalThis.createGraph = createGraph;
-})();
+  // --------------------------------------
+  // import
+  // --------------------------------------
+  const moduleCache = create(null);
 
-(function () {
-  const modules = create(null);
+  const OWN_STACK_DEPTH = 3;
 
   const whosthere = (stack) => {
     // figure out module name from stack
+    // skip the frames of our own implementation and pick the file locaiton from the caller
+    // the depth of own stack should be fixed
+    const frames = stack.split("\n");
+    const callerFrame = frames[OWN_STACK_DEPTH];
+    const match = callerFrame.match(/at (.+):(\d+):(\d+)/);
+    if (match) {
+      const [, file] = match;
+      log("whosthere: ", file);
+      return file;
+    }
+    throw new Error("Failed to determine module name fom " + callerFrame);
   };
 
+  // make exports a proxy and whenever assigned, it'll check who did that with a stack trace and save to the matching module namespace.
   const MODULE = {};
+
   defineProperty(globalThis, "module", {
     value: MODULE,
     configurable: false,
     enumerable: false,
   });
+
+  const getExports = () => {
+    const id = whosthere(Error().stack);
+    const cachedModule = moduleCache[id];
+    if (cachedModule) {
+      return cachedModule.exports;
+    }
+    const exports = {};
+    moduleCache[id] = { exports };
+    return exports;
+  };
+  const ensureExport = () => {
+    const id = whosthere(Error().stack);
+    const cachedModule = moduleCache[id];
+    if (!cachedModule) {
+      moduleCache[id] = { exports: {} };
+    }
+    return id;
+  };
+
+  // I'm too impatient to implement this properly now
+  const awfullyNaiveResolve = (specifier) => {
+    specifier = specifier.replace(/^\./, "test");
+    const matchingKeys = keys(moduleCache).filter((key) =>
+      key.includes(specifier),
+    );
+    if (matchingKeys.length === 0) {
+      return null;
+    }
+    return matchingKeys[0];
+  };
+
   defineProperty(MODULE, "exports", {
-    get() {},
-    set(v) {},
+    get() {
+      return getExports();
+    },
+    set(v) {
+      const id = ensureExport();
+      moduleCache[id] = { exports: v };
+      return true;
+    },
+    configurable: false,
+    enumerable: true,
   });
+  freeze(MODULE);
 
   defineProperty(globalThis, "exports", {
     get() {
-      return MODULE.exports;
+      return getExports();
     },
-    writable: false,
     configurable: false,
     enumerable: false,
   });
 
-  const REQUIRE = (specifier) => {};
+  const REQUIRE = (specifier) => {
+    const id = awfullyNaiveResolve(specifier);
+    return moduleCache[id].exports;
+  };
 
   defineProperty(globalThis, "require", {
     value: REQUIRE,
@@ -164,9 +227,43 @@
     enumerable: false,
   });
 
-  const importCJS = async (specifier) => {
-    //initial setup - move here?
-
-    REQUIRE(specifier);
+  // omg so inefficient
+  const findNext = (graph, executed) => {
+    return graph.find(
+      ([specifier, children]) =>
+        children.every(
+          (child) => !!moduleCache[awfullyNaiveResolve(child)]?.exports,
+        ) && !executed.has(specifier),
+    );
   };
-});
+
+  // graph execution
+  const bottomUpExecute = async ({ graph, noDependencies }) => {
+    // execute each leaf and its mutations to exports will be preserved in moduleCache
+    for (const specifier of noDependencies) {
+      await import(resolve(specifier));
+    }
+    log("Leaves executed", noDependencies, moduleCache);
+    const executed = new Set();
+    // continue finding next modules to execute by taking first that has its dependencies met in moduleCache
+    let next = findNext(graph, executed);
+    while (next) {
+      log("Executing", next[0]);
+      await import(resolve(next[0]));
+      executed.add(next[0]);
+      next = findNext(graph, executed);
+    }
+
+    log("Graph executed", graph, moduleCache);
+  };
+
+  const importCJS = async (specifier) => {
+    const { graph, noDependencies } = await createGraph(specifier);
+
+    await bottomUpExecute({ graph, noDependencies });
+
+    return REQUIRE(specifier);
+  };
+
+  globalThis.importCJS = importCJS;
+})();
